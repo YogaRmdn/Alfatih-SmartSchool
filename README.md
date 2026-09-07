@@ -6,6 +6,9 @@ A standalone desktop application for managing **daily student attendance** (abse
 
 ---
 
+## Screenshot application
+!(Alfatih-SmartSchool)[ss.png]
+
 ## Features
 
 ### Attendance (Absensi)
