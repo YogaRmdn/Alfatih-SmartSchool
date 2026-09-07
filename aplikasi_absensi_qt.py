@@ -7,7 +7,7 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from PySide6.QtCore import Qt, QDate, QLocale, QEasingCurve, QPropertyAnimation, QPoint, QSize
+from PySide6.QtCore import Qt, QDate, QLocale, QEasingCurve, QPropertyAnimation, QSize
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -562,6 +562,7 @@ def get_conn():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -641,36 +642,23 @@ def ambil_status(tanggal, siswa_id):
         conn.close()
 
 
-def ambil_tanggal_nilai(kelas_id, jenis):
+def simpan_nilai_batch(data):
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT n.tanggal
-            FROM nilai n
-            JOIN siswa s ON s.id = n.siswa_id
-            WHERE s.kelas_id = ? AND n.jenis = ?
-            ORDER BY n.tanggal DESC
-            """,
-            (kelas_id, jenis),
-        ).fetchall()
-        return [r["tanggal"] for r in rows]
-    finally:
-        conn.close()
-
-
-def simpan_nilai(siswa_id, jenis, tanggal, nilai):
-    conn = get_conn()
-    try:
-        conn.execute(
-            "DELETE FROM nilai WHERE siswa_id = ? AND jenis = ? AND tanggal = ?",
-            (siswa_id, jenis, tanggal),
-        )
-        conn.execute(
-            "INSERT INTO nilai (siswa_id, jenis, tanggal, nilai) VALUES (?, ?, ?, ?)",
-            (siswa_id, jenis, tanggal, nilai),
-        )
+        conn.execute("BEGIN")
+        for siswa_id, jenis, tanggal, nilai in data:
+            conn.execute(
+                "DELETE FROM nilai WHERE siswa_id = ? AND jenis = ? AND tanggal = ?",
+                (siswa_id, jenis, tanggal),
+            )
+            conn.execute(
+                "INSERT INTO nilai (siswa_id, jenis, tanggal, nilai) VALUES (?, ?, ?, ?)",
+                (siswa_id, jenis, tanggal, nilai),
+            )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -1085,6 +1073,11 @@ class HalamanAbsensi(QWidget):
                 )
                 baru = jenis
             conn.commit()
+        except sqlite3.Error as e:
+            QMessageBox.critical(
+                self, "Gagal", f"Terjadi kesalahan saat menyimpan presensi:\n{e}"
+            )
+            return
         finally:
             conn.close()
 
@@ -1163,6 +1156,11 @@ class HalamanAbsensi(QWidget):
                 [(tanggal, i) for i in ids],
             )
             conn.commit()
+        except sqlite3.Error as e:
+            QMessageBox.critical(
+                self, "Gagal", f"Terjadi kesalahan saat menandai hadir:\n{e}"
+            )
+            return
         finally:
             conn.close()
         self.muat_presensi()
@@ -1325,18 +1323,23 @@ class HalamanKelola(QWidget):
             QMessageBox.warning(self, "Peringatan", "Nama kelas tidak boleh kosong!")
             return
         conn = get_conn()
+        kid_baru = None
         try:
             ada = conn.execute(
                 "SELECT 1 FROM kelas WHERE nama_kelas = ?", (nama,)
             ).fetchone()
-            if ada:
-                QMessageBox.warning(self, "Peringatan", f"Kelas '{nama}' sudah ada!")
-                return
-            cur = conn.execute("INSERT INTO kelas (nama_kelas) VALUES (?)", (nama,))
-            kid_baru = cur.lastrowid
-            conn.commit()
+            if not ada:
+                cur = conn.execute("INSERT INTO kelas (nama_kelas) VALUES (?)", (nama,))
+                kid_baru = cur.lastrowid
+                conn.commit()
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat menambah kelas.")
+            return
         finally:
             conn.close()
+        if kid_baru is None:
+            QMessageBox.warning(self, "Peringatan", f"Kelas '{nama}' sudah ada!")
+            return
         self.input_kelas.clear()
         self.utama.segarkan_kelas()
         for i in range(self.list_kelas.count()):
@@ -1355,6 +1358,9 @@ class HalamanKelola(QWidget):
             n = conn.execute(
                 "SELECT COUNT(*) AS n FROM siswa WHERE kelas_id = ?", (kid,)
             ).fetchone()["n"]
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat menghapus kelas.")
+            return
         finally:
             conn.close()
         pesan = (
@@ -1375,6 +1381,8 @@ class HalamanKelola(QWidget):
         try:
             conn.execute("DELETE FROM kelas WHERE id = ?", (kid,))
             conn.commit()
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat menghapus kelas.")
         finally:
             conn.close()
         self.utama.segarkan_kelas()
@@ -1402,6 +1410,9 @@ class HalamanKelola(QWidget):
                 return
             conn.execute("UPDATE kelas SET nama_kelas = ? WHERE id = ?", (baru, kid))
             conn.commit()
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat mengubah kelas.")
+            return
         finally:
             conn.close()
         self.utama.segarkan_kelas()
@@ -1424,17 +1435,21 @@ class HalamanKelola(QWidget):
             ada = conn.execute(
                 "SELECT 1 FROM siswa WHERE kelas_id = ? AND nama = ?", (kid, nama)
             ).fetchone()
-            if ada:
-                QMessageBox.warning(
-                    self, "Peringatan", f"'{nama}' sudah ada di kelas ini!"
+            if not ada:
+                conn.execute(
+                    "INSERT INTO siswa (kelas_id, nama) VALUES (?, ?)", (kid, nama)
                 )
-                return
-            conn.execute(
-                "INSERT INTO siswa (kelas_id, nama) VALUES (?, ?)", (kid, nama)
-            )
-            conn.commit()
+                conn.commit()
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat menambah siswa.")
+            return
         finally:
             conn.close()
+        if ada:
+            QMessageBox.warning(
+                self, "Peringatan", f"'{nama}' sudah ada di kelas ini!"
+            )
+            return
         self.input_siswa.clear()
         self.muat_siswa()
         self.utama.halaman_absensi.muat_presensi()
@@ -1524,15 +1539,19 @@ class HalamanKelola(QWidget):
                 "SELECT 1 FROM siswa WHERE kelas_id = ? AND nama = ? AND id != ?",
                 (kid, baru, sid),
             ).fetchone()
-            if ada:
-                QMessageBox.warning(
-                    self, "Peringatan", f"'{baru}' sudah ada di kelas ini!"
-                )
-                return
-            conn.execute("UPDATE siswa SET nama = ? WHERE id = ?", (baru, sid))
-            conn.commit()
+            if not ada:
+                conn.execute("UPDATE siswa SET nama = ? WHERE id = ?", (baru, sid))
+                conn.commit()
+        except sqlite3.Error:
+            QMessageBox.critical(self, "Gagal", "Terjadi kesalahan saat mengubah siswa.")
+            return
         finally:
             conn.close()
+        if ada:
+            QMessageBox.warning(
+                self, "Peringatan", f"'{baru}' sudah ada di kelas ini!"
+            )
+            return
         self.muat_siswa()
         self.utama.halaman_absensi.muat_presensi()
 
@@ -1708,7 +1727,7 @@ class HalamanRekap(QWidget):
             rows = conn.execute(
                 "SELECT p.tanggal, k.nama_kelas, s.nama, p.status "
                 + dasar + where
-                + " ORDER BY p.tanggal DESC, k.nama_kelas, s.nama LIMIT 5000",
+                + " ORDER BY p.tanggal DESC, k.nama_kelas, s.nama",
                 params,
             ).fetchall()
         finally:
@@ -1727,7 +1746,6 @@ class HalamanRekap(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.tabel.setItem(r, c, item)
         self.badge_data.setText(f"{total} catatan")
-
     def hapus_semua_data(self):
         jawab = QMessageBox.question(
             self,
@@ -2082,7 +2100,10 @@ class HalamanNilai(QWidget):
         kepala = QVBoxLayout()
         judul = QLabel("Input Nilai")
         judul.setObjectName("judul_halaman")
-        sub = QLabel("Masukkan nilai Latihan, Ulangan, UTS, dan UAS untuk tiap siswa.")
+        sub = QLabel(
+            "Pilih kelas, jenis nilai, dan tanggal sesuai keinginan. "
+            "Isi nilai tiap siswa lalu klik \"Simpan Nilai\" - data otomatis masuk ke Rekap Nilai & Kesimpulan Nilai."
+        )
         sub.setObjectName("subjudul_halaman")
         kepala.addWidget(judul)
         kepala.addWidget(sub)
@@ -2105,27 +2126,20 @@ class HalamanNilai(QWidget):
         self.combo_jenis.setMinimumWidth(130)
         label_tanggal = QLabel("Tanggal")
         label_tanggal.setObjectName("bagian")
-        self.combo_tanggal = QComboBox()
-        self.combo_tanggal.setMinimumWidth(158)
-        self.tanggal_baru = KalenderMerahPopup()
-        self.tanggal_baru.setDisplayFormat("yyyy-MM-dd")
-        self.tanggal_baru.setDate(QDate.currentDate())
-        self.tanggal_baru.setMinimumWidth(158)
-        btn_tambah_tanggal = QPushButton("+ Tanggal Baru")
-        btn_tambah_tanggal.setObjectName("netral")
-        btn_tambah_tanggal.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_tambah_tanggal.clicked.connect(self.tambah_tanggal)
+        self.date_tanggal = KalenderMerahPopup()
+        self.date_tanggal.setDisplayFormat("yyyy-MM-dd")
+        self.date_tanggal.setCalendarPopup(True)
+        self.date_tanggal.setDate(QDate.currentDate())
+        self.date_tanggal.setMinimumWidth(158)
         btn_simpan = QPushButton("Simpan Nilai")
         btn_simpan.setObjectName("utama")
         btn_simpan.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_simpan.clicked.connect(self.simpan_nilai)
         for w in (
             label_kelas, self.combo_kelas, label_jenis, self.combo_jenis,
-            label_tanggal, self.combo_tanggal,
+            label_tanggal, self.date_tanggal,
         ):
             baris.addWidget(w)
-        baris.addWidget(self.tanggal_baru)
-        baris.addWidget(btn_tambah_tanggal)
         baris.addStretch()
         baris.addWidget(btn_simpan)
         root.addWidget(kartu_alat)
@@ -2144,10 +2158,11 @@ class HalamanNilai(QWidget):
 
         self.combo_kelas.currentIndexChanged.connect(lambda _: self.muat_nilai())
         self.combo_jenis.currentIndexChanged.connect(lambda _: self.muat_nilai())
-        self.combo_tanggal.currentIndexChanged.connect(lambda _: self.muat_nilai())
+        self.date_tanggal.dateChanged.connect(lambda _: self.muat_nilai())
+        self.peta_spin = {}
         tinggi_seragam(
-            self.combo_kelas, self.combo_jenis, self.combo_tanggal,
-            self.tanggal_baru, btn_tambah_tanggal, btn_simpan,
+            self.combo_kelas, self.combo_jenis,
+            self.date_tanggal, btn_simpan,
         )
 
     def kelas_id_aktif(self):
@@ -2163,19 +2178,10 @@ class HalamanNilai(QWidget):
         self.muat_nilai()
 
     def reset_tanggal(self):
-        self.tanggal_baru.blockSignals(True)
-        self.tanggal_baru.setDate(QDate.currentDate())
-        self.tanggal_baru.blockSignals(False)
+        self.date_tanggal.blockSignals(True)
+        self.date_tanggal.setDate(QDate.currentDate())
+        self.date_tanggal.blockSignals(False)
         self.muat_nilai()
-
-    def tambah_tanggal(self):
-        tgl = self.tanggal_baru.date().toString("yyyy-MM-dd")
-        existing = [self.combo_tanggal.itemText(i) for i in range(self.combo_tanggal.count())]
-        if tgl not in existing:
-            self.combo_tanggal.addItem(tgl, tgl)
-            self.combo_tanggal.setCurrentText(tgl)
-        else:
-            self.combo_tanggal.setCurrentText(tgl)
 
     def muat_nilai(self):
         while self.layout_kartu.count() > 1:
@@ -2188,17 +2194,10 @@ class HalamanNilai(QWidget):
             self._tampil_kosong("Pilih kelas terlebih dahulu.")
             return
         jenis = self.combo_jenis.currentText()
-        self.combo_tanggal.blockSignals(True)
-        self.combo_tanggal.clear()
-        for tgl in ambil_tanggal_nilai(kid, jenis):
-            self.combo_tanggal.addItem(tgl, tgl)
-        if self.combo_tanggal.count() == 0:
-            self.combo_tanggal.addItem("Pilih atau tambah tanggal", None)
-        self.combo_tanggal.blockSignals(False)
         self._muat_isi(kid, jenis)
 
     def _muat_isi(self, kid, jenis):
-        tanggal = self.combo_tanggal.currentData() or self.tanggal_baru.date().toString("yyyy-MM-dd")
+        tanggal = self.date_tanggal.date().toString("yyyy-MM-dd")
         siswa = ambil_nilai_tanggal(kid, jenis, tanggal)
         if not siswa:
             self._tampil_kosong("Kelas ini masih kosong atau belum ada data.")
@@ -2218,12 +2217,24 @@ class HalamanNilai(QWidget):
         badge.setStyleSheet(
             f"background: {JENIS_NILAI_WARNA[jenis]}; color: #FFFFFF;"
         )
-        lab_tgl = QLabel(f"Nilai {jenis} — {tanggal}")
+        lab_tgl = QLabel(f"Nilai {jenis} - {tanggal}")
         lab_tgl.setObjectName("card_judul")
         header.addWidget(badge)
         header.addWidget(lab_tgl)
         header.addStretch()
         kolom.addLayout(header)
+
+        jumlah_terisi = sum(1 for d in siswa if d["nilai"] is not None)
+        info = QLabel(
+            f"{jumlah_terisi} dari {len(siswa)} siswa sudah punya nilai di tanggal ini. "
+            "Nilai yang tersimpan otomatis termuat dan bisa diubah."
+            if jumlah_terisi
+            else f"Belum ada nilai untuk tanggal {tanggal}. "
+                 "Isi nilai tiap siswa di bawah lalu klik \"Simpan Nilai\"."
+        )
+        info.setObjectName("total")
+        info.setWordWrap(True)
+        kolom.addWidget(info)
 
         self.peta_spin = {}
         for data in siswa:
@@ -2267,11 +2278,20 @@ class HalamanNilai(QWidget):
             QMessageBox.warning(self, "Peringatan", "Pilih kelas dulu!")
             return
         jenis = self.combo_jenis.currentText()
-        tanggal = self.combo_tanggal.currentData() or self.tanggal_baru.date().toString("yyyy-MM-dd")
-        if not hasattr(self, "peta_spin"):
+        tanggal = self.date_tanggal.date().toString("yyyy-MM-dd")
+        if not self.peta_spin:
             return
-        for sid, spin in self.peta_spin.items():
-            simpan_nilai(sid, jenis, tanggal, spin.value())
+        try:
+            simpan_nilai_batch(
+                (sid, jenis, tanggal, spin.value())
+                for sid, spin in self.peta_spin.items()
+            )
+        except sqlite3.Error as e:
+            QMessageBox.critical(
+                self, "Gagal",
+                f"Terjadi kesalahan saat menyimpan nilai:\n{e}",
+            )
+            return
         QMessageBox.information(
             self, "Sukses",
             f"Nilai {jenis} ({tanggal}) berhasil disimpan untuk kelas terpilih.",
@@ -2460,7 +2480,10 @@ class HalamanRekapNilai(QWidget):
         kepala = QVBoxLayout()
         judul = QLabel("Rekap Nilai")
         judul.setObjectName("judul_halaman")
-        sub = QLabel("Detail seluruh nilai (Latihan, Ulangan, UTS, UAS) tiap siswa.")
+        sub = QLabel(
+            "Detail nilai tiap siswa per tanggal (Latihan, Ulangan, UTS, UAS). "
+            "Setiap nilai yang disimpan menampilkan jenis dan tanggal inputnya."
+        )
         sub.setObjectName("subjudul_halaman")
         kepala.addWidget(judul)
         kepala.addWidget(sub)
@@ -2486,7 +2509,7 @@ class HalamanRekapNilai(QWidget):
         label_dari.setObjectName("bagian")
         self.dari = KalenderMerahPopup()
         self.dari.setDisplayFormat("yyyy-MM-dd")
-        self.dari.setDate(QDate.currentDate().addDays(-30))
+        self.dari.setDate(QDate.currentDate().addDays(-365))
         self.dari.setMinimumWidth(158)
         label_sampai = QLabel("Sampai")
         label_sampai.setObjectName("bagian")
@@ -2592,7 +2615,7 @@ class HalamanRekapNilai(QWidget):
     def reset_tanggal(self):
         self.dari.blockSignals(True)
         self.sampai.blockSignals(True)
-        self.dari.setDate(QDate.currentDate().addDays(-30))
+        self.dari.setDate(QDate.currentDate().addDays(-365))
         self.sampai.setDate(QDate.currentDate())
         self.dari.blockSignals(False)
         self.sampai.blockSignals(False)
