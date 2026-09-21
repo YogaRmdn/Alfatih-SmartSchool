@@ -7,7 +7,22 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from PySide6.QtCore import Qt, QDate, QLocale, QEasingCurve, QPropertyAnimation, QSize
+from PySide6.QtCore import (
+    QDate,
+    QEasingCurve,
+    QEvent,
+    QLocale,
+    QObject,
+    QPauseAnimation,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QSequentialAnimationGroup,
+    QSize,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -55,12 +70,20 @@ STATUS_WARNA = {
 }
 JENIS_NILAI = ["Latihan", "Ulangan", "UTS", "UAS"]
 BOBOT_NILAI = {"Latihan": 20, "Ulangan": 30, "UTS": 20, "UAS": 30}
+
+# Qt6 (PySide6) mengembalikan hari sebagai int pada beberapa versi;
+# nilai enum dipakai agar perbandingan tetap bekerja lintas versi.
+HARI_MINGGU = getattr(Qt.DayOfWeek.Sunday, "value", Qt.DayOfWeek.Sunday)
 JENIS_NILAI_WARNA = {
     "Latihan": "#0EA5E9",
     "Ulangan": "#8B5CF6",
     "UTS": "#F59E0B",
     "UAS": "#EF4444",
 }
+
+# Daftar animasi QPropertyAnimation yang sedang berjalan
+# (menjaga referensi agar tidak digarbage-collect oleh Python)
+_ANIM_AKTIF = []
 
 # Hari Libur Nasional Indonesia
 # Libur tetap (tanggal sama setiap tahun)
@@ -142,6 +165,12 @@ LIBUR_DINAMIS = {
     },
 }
 
+def adakah_hari_minggu(tanggal: QDate) -> bool:
+    """Apakah tanggal jatuh pada hari Minggu (kompatibel lintas versi PySide6)."""
+    dow = tanggal.dayOfWeek()
+    return getattr(dow, "value", dow) == HARI_MINGGU
+
+
 def apakah_libur(tanggal: QDate) -> Optional[str]:
     bulan = tanggal.month()
     hari = tanggal.day()
@@ -218,12 +247,12 @@ class KalenderMerahPopup(QDateEdit):
 
 STYLESHEET = """
 * { font-family: 'Poppins', 'Segoe UI'; }
-QMainWindow { background-color: #EFF7F1; }
+QMainWindow { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F9FCFA, stop:1 #E6F1EA); }
 
 QWidget#sidebar {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #0F8A43, stop:1 #0B5A2E);
-    border-right: 1px solid rgba(0, 0, 0, 0.08);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #0C8346, stop:0.55 #0A6234, stop:1 #073E22);
+    border-right: 1px solid rgba(0, 0, 0, 0.12);
 }
 QLabel#brand { font-size: 19px; font-weight: 700; color: #FFFFFF; }
 QLabel#brand_small { font-size: 15px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.2px; }
@@ -247,6 +276,12 @@ QPushButton#nav {
 QPushButton#nav::hover { background-color: rgba(255, 255, 255, 0.12); color: #FFFFFF; }
 QPushButton#nav:pressed { background-color: rgba(255, 255, 255, 0.20); }
 QPushButton#nav:checked { background-color: #FFFFFF; color: #0B5A2E; font-weight: 700; }
+
+QFrame#indikator_nav {
+    background-color: rgba(255, 255, 255, 0.16);
+    border: none;
+    border-radius: 11px;
+}
 QLabel#seksi {
     color: rgba(255, 255, 255, 0.50);
     font-size: 10.5px; font-weight: 700;
@@ -264,42 +299,43 @@ QLabel#kosong { color: #87AB97; font-size: 14px; background: transparent; }
 
 QFrame#kartu {
     background-color: #FFFFFF;
-    border: 1px solid #DCECE2;
-    border-radius: 16px;
+    border: 1px solid #E0EDE6;
+    border-radius: 18px;
 }
+QFrame#kartu:hover { border-color: #B8DCC8; }
 QFrame#kartu_siswa {
     background-color: #FFFFFF;
-    border: 1px solid #DCECE2;
-    border-radius: 13px;
+    border: 1px solid #E3EFE8;
+    border-radius: 14px;
 }
-QFrame#kartu_siswa:hover { border: 1px solid #A9DEC1; }
+QFrame#kartu_siswa:hover { border: 1px solid #16A34A; background-color: #FBFFFC; }
 
 QLineEdit, QPlainTextEdit {
-    border: 1px solid #C9DFD2;
-    border-radius: 11px;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
     padding: 11px 16px;
     font-size: 14px;
     background-color: #FFFFFF;
-    color: #13301F;
+    color: #14301F;
     selection-background-color: #A9DEC1;
 }
 QLineEdit { padding: 0px 16px; }
 QLineEdit:focus, QPlainTextEdit:focus {
-    border: 1.5px solid #16A34A;
-    background-color: #FBFFFC;
+    border: 2px solid #16A34A;
+    background-color: #FDFFFE;
 }
 QLineEdit::placeholder, QPlainTextEdit::placeholder { color: #9DBBA9; }
 
 QComboBox {
-    border: 1px solid #C9DFD2;
-    border-radius: 11px;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
     padding: 0px 8px 0px 16px;
     font-size: 14px;
     background-color: #FFFFFF;
-    color: #13301F;
+    color: #14301F;
 }
 QComboBox:hover { border-color: #87AB97; }
-QComboBox:focus { border: 1.5px solid #16A34A; }
+QComboBox:focus { border: 2px solid #16A34A; }
 QComboBox::drop-down { border: none; width: 30px; }
 QComboBox::down-arrow {
     image: none;
@@ -330,29 +366,41 @@ QComboBox QAbstractItemView::item:hover { background-color: #EDF5EF; }
 
 QPushButton {
     border: none;
-    border-radius: 11px;
+    border-radius: 12px;
     padding: 0px 20px;
     font-size: 14px;
     font-weight: 600;
+    letter-spacing: 0.2px;
 }
-QPushButton#utama { background-color: #16A34A; color: #FFFFFF; }
-QPushButton#utama::hover { background-color: #15803D; }
-QPushButton#utama:pressed { background-color: #116933; }
-QPushButton#masuk { background-color: #10B981; color: #FFFFFF; }
-QPushButton#masuk::hover { background-color: #059669; }
+QPushButton#utama {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1DBA5C, stop:1 #138E48);
+    color: #FFFFFF;
+}
+QPushButton#utama::hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17A44F, stop:1 #0F7A3C);
+}
+QPushButton#utama:pressed { background-color: #0C6B34; }
+QPushButton#masuk {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14C07E, stop:1 #0EA46C);
+    color: #FFFFFF;
+}
+QPushButton#masuk::hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0FB879, stop:1 #09805C);
+}
+QPushButton#masuk:pressed { background-color: #047857; }
 QPushButton#netral {
-    background-color: #FFFFFF; color: #31513D; border: 1px solid #C9DFD2;
+    background-color: #FFFFFF; color: #31513D; border: 1px solid #CDE2D5;
 }
-QPushButton#netral::hover { background-color: #EDF5EF; }
+QPushButton#netral::hover { background-color: #EEF7F1; border-color: #A9DEC1; }
 QPushButton#bahaya { background-color: #EF4444; color: #FFFFFF; }
 QPushButton#bahaya::hover { background-color: #DC2626; }
 
 QPushButton[jenis] {
     background-color: #FFFFFF; color: #5F7D6B;
-    border: 1px solid #C9DFD2; border-radius: 9px;
+    border: 1px solid #D3E5DA; border-radius: 11px;
     padding: 8px 16px; font-size: 12px; font-weight: 700;
 }
-QPushButton[jenis]:hover { background-color: #F3FAF6; }
+QPushButton[jenis]:hover { background-color: #F2FAF5; border-color: #9AD3B4; }
 QPushButton[jenis="Hadir"]:checked { background-color: #10B981; border-color: #10B981; color: #FFFFFF; }
 QPushButton[jenis="Alpa"]:checked { background-color: #EF4444; border-color: #EF4444; color: #FFFFFF; }
 QPushButton[jenis="Izin"]:checked { background-color: #3B82F6; border-color: #3B82F6; color: #FFFFFF; }
@@ -369,15 +417,15 @@ QLabel[chip="Sakit"] { background-color: #FEF3C7; color: #92400E; }
 QLabel[chip="Belum"] { background-color: #EDF5EF; color: #5F7D6B; }
 
 QDateEdit {
-    border: 1px solid #C9DFD2;
-    border-radius: 11px;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
     padding: 0px 6px 0px 14px;
     font-size: 13.5px;
     background-color: #FFFFFF;
-    color: #13301F;
+    color: #14301F;
 }
 QDateEdit:hover { border-color: #87AB97; }
-QDateEdit:focus { border: 1.5px solid #16A34A; }
+QDateEdit:focus { border: 2px solid #16A34A; }
 QDateEdit::up-button, QDateEdit::down-button {
     width: 0px;
     height: 0px;
@@ -405,9 +453,9 @@ QDateEdit::down-arrow {
 
 QMenu {
     background-color: #FFFFFF;
-    color: #13301F;
-    border: 1px solid #DCECE2;
-    border-radius: 10px;
+    color: #14301F;
+    border: 1px solid #E0EDE6;
+    border-radius: 12px;
     padding: 6px;
 }
 QMenu::item {
@@ -471,20 +519,23 @@ QTableWidget {
     border: none;
     background-color: #FFFFFF;
     gridline-color: transparent;
-    alternate-background-color: #EDF8F2;
+    alternate-background-color: #F1FAF4;
     selection-background-color: #CDEFDD;
     selection-color: #123A26;
     font-size: 13px;
-    color: #13301F;
+    color: #14301F;
+    outline: none;
 }
+QTableWidget::item { padding: 2px 6px; }
+QTableWidget::item:hover { background-color: #EAF5EE; }
 QHeaderView::section {
-    background-color: #D5F0E0;
-    color: #1F5B3A;
+    background-color: #E1F3E9;
+    color: #1B5A39;
     font-size: 12px;
     font-weight: 700;
     border: none;
-    border-bottom: 1px solid #BFE2CE;
-    padding: 11px 9px;
+    border-bottom: 1px solid #C9E7D4;
+    padding: 13px 10px;
 }
 QTableCornerButton::section { background-color: #D5F0E0; border: none; }
 
@@ -500,16 +551,16 @@ QLabel#card_badge {
     font-size: 12px; font-weight: 700;
 }
 QFrame#search_frame {
-    background-color: #F3FAF6;
-    border: 1px solid #DCECE2;
-    border-radius: 12px;
+    background-color: #EFF8F2;
+    border: 1px solid #E0EDE6;
+    border-radius: 14px;
 }
 QLabel#search_label { font-size: 13px; font-weight: 600; color: #5F7D6B; background: transparent; }
 
 QFrame#nilai_kartu {
     background-color: #FFFFFF;
-    border: 1px solid #DCECE2;
-    border-radius: 14px;
+    border: 1px solid #E4EFE9;
+    border-radius: 16px;
 }
 QLabel#nilai_jenis {
     font-size: 15px; font-weight: 800; color: #13301F;
@@ -530,22 +581,38 @@ QLabel#val_akhir {
 }
 QLabel#label_rapor { font-size: 12px; font-weight: 600; color: #5F7D6B; background: transparent; }
 QDoubleSpinBox {
-    border: 1px solid #C9DFD2;
-    border-radius: 11px;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
     padding: 0px 12px;
     font-size: 14px;
     background-color: #FFFFFF;
-    color: #13301F;
+    color: #14301F;
 }
-QDoubleSpinBox:focus { border: 1.5px solid #16A34A; }
+QDoubleSpinBox:focus { border: 2px solid #16A34A; }
 QFrame#kosong_jadwal {
     background-color: #FFFFFF;
     border: 1px dashed #C9DFD2;
-    border-radius: 14px;
+    border-radius: 16px;
 }
 
 QScrollArea { border: none; background: transparent; }
 QWidget#konten_absen { background: transparent; }
+
+QToolTip {
+    background-color: #123A26; color: #FFFFFF;
+    border: none; border-radius: 8px;
+    padding: 6px 10px; font-size: 12px;
+}
+QDialog { background-color: #F4F8F5; }
+QDialogButtonBox QPushButton {
+    min-height: 36px; padding: 0px 18px;
+    border-radius: 10px;
+    background-color: #FFFFFF;
+    color: #31513D;
+    border: 1px solid #CDE2D5;
+    font-weight: 600;
+}
+QDialogButtonBox QPushButton:hover { background-color: #EEF7F1; border-color: #A9DEC1; }
 
 QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
 QScrollBar::handle:vertical { background: #C9DFD2; border-radius: 4px; min-height: 30px; }
@@ -809,6 +876,127 @@ def pasang_shadow(widget, blur=34, alfa=55, offset_y=5):
     shadow.setColor(QColor(16, 92, 45, alfa))
     shadow.setOffset(0, offset_y)
     widget.setGraphicsEffect(shadow)
+    widget._efek_shadow = shadow
+    return shadow
+
+
+def _efek_opacity(widget):
+    """Ambil (atau buat) efek opacity khusus untuk widget ini."""
+    efe = getattr(widget, "_efek_op", None)
+    if efe is None:
+        efe = QGraphicsOpacityEffect(widget)
+        widget._efek_op = efe
+    widget.setGraphicsEffect(efe)
+    return efe
+
+
+def _bersih_efek(widget, efe):
+    efe.setOpacity(1.0)
+    if widget.graphicsEffect() is efe:
+        widget.setGraphicsEffect(None)
+
+
+def animasi_masuk(widget, delay=0, dur=360):
+    """Fade-in halus (opacity 0 -> 1) dengan easing OutCubic + jeda opsional."""
+    efe = _efek_opacity(widget)
+    efe.setOpacity(0.0)
+    anim = QPropertyAnimation(efe, b"opacity", widget)
+    anim.setDuration(dur)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    grup = QSequentialAnimationGroup(widget)
+    if delay:
+        grup.addAnimation(QPauseAnimation(int(delay), grup))
+    grup.addAnimation(anim)
+    _ANIM_AKTIF.append(grup)
+
+    def _selesai():
+        if grup in _ANIM_AKTIF:
+            _ANIM_AKTIF.remove(grup)
+        _bersih_efek(widget, efe)
+
+    grup.finished.connect(_selesai)
+    grup.start()
+
+
+def bungkus_masuk(widget, delay=0, dur=360):
+    """Bungkus widget dalam wrapper transparan lalu animasikan masuk ke layar."""
+    bungkus = QWidget()
+    lay = QVBoxLayout(bungkus)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(0)
+    lay.addWidget(widget)
+    animasi_masuk(bungkus, delay=delay, dur=dur)
+    return bungkus
+
+
+def pulsar(widget, dur=200, dari=0.45):
+    """Puls singkat (opacity turun lalu kembali) untuk feedback klik/perubahan."""
+    efe = _efek_opacity(widget)
+    efe.setOpacity(dari)
+    anim = QPropertyAnimation(efe, b"opacity", widget)
+    anim.setDuration(dur)
+    anim.setStartValue(dari)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    _ANIM_AKTIF.append(anim)
+    anim.finished.connect(lambda: _beres(widget, efe, anim))
+    anim.start()
+
+
+def _beres(widget, efe, anim):
+    if anim in _ANIM_AKTIF:
+        _ANIM_AKTIF.remove(anim)
+    _bersih_efek(widget, efe)
+
+
+class AngkatAksi(QObject):
+    """Hover-lift: kartu sedikit terangkat (shadow naik) saat kursor di atasnya."""
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        self.widget = widget
+        self.efek = getattr(widget, "_efek_shadow", None)
+        if self.efek is None:
+            self.efek = pasang_shadow(widget, blur=26, alfa=40, offset_y=3)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Enter:
+            self._angkat(6, 30)
+        elif ev.type() == QEvent.Type.Leave:
+            self._angkat(3, 24)
+        return super().eventFilter(obj, ev)
+
+    def _angkat(self, y, blur):
+        lama = getattr(self.widget, "_anim_angkat", None)
+        if lama is not None:
+            lama.stop()
+        anim = QPropertyAnimation(self.efek, b"offset", self.widget)
+        anim.setDuration(180)
+        anim.setStartValue(self.efek.offset())
+        anim.setEndValue(QPointF(0, y))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.widget._anim_angkat = anim
+        anim.start()
+
+        anim2 = QPropertyAnimation(self.efek, b"blurRadius", self.widget)
+        anim2.setDuration(180)
+        anim2.setStartValue(self.efek.blurRadius())
+        anim2.setEndValue(blur)
+        anim2.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.widget._anim_angkat_blur = anim2
+        anim2.start()
+
+
+def pasang_hover_angkat(widget):
+    """Pasang efek hover-lift pada widget (memakai shadow yang sudah ada bila ada)."""
+    if getattr(widget, "_hover_angkat", False):
+        return None
+    widget._hover_angkat = True
+    return AngkatAksi(widget)
 
 
 def muat_font():
@@ -937,7 +1125,7 @@ class HalamanAbsensi(QWidget):
 
     def _peringatan_hari(self, qdate):
         alasan = None
-        if qdate.dayOfWeek() == Qt.DayOfWeek.Sunday:
+        if adakah_hari_minggu(qdate):
             alasan = "hari Minggu"
         else:
             libur = apakah_libur(qdate)
@@ -999,16 +1187,21 @@ class HalamanAbsensi(QWidget):
             self.perbarui_chip({})
             return
 
-        for data in rows:
+        for i, data in enumerate(rows):
             kartu = self._buat_kartu(data["id"], data["nama"], data["status"])
-            self.layout_kartu.insertWidget(self.layout_kartu.count() - 1, kartu)
+            self.layout_kartu.insertWidget(
+                self.layout_kartu.count() - 1,
+                bungkus_masuk(kartu, delay=min(i * 45, 540)),
+            )
         self.perbarui_chip(self._hitung_status(rows))
 
     def _tampil_kosong(self, teks):
         label = QLabel(teks)
         label.setObjectName("kosong")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout_kartu.insertWidget(0, label, 1, Qt.AlignmentFlag.AlignHCenter)
+        self.layout_kartu.insertWidget(
+            0, bungkus_masuk(label, delay=80), 1, Qt.AlignmentFlag.AlignHCenter
+        )
 
     def _buat_kartu(self, siswa_id, nama, status):
         kartu = QFrame()
@@ -1052,6 +1245,7 @@ class HalamanAbsensi(QWidget):
         tanggal = self.tanggal_aktif()
         qdate = self.date_edit.date()
         if not self._peringatan_hari(qdate):
+            self._sinkron_tombol(siswa_id)
             return
         lama = ambil_status(tanggal, siswa_id)
         tombol_peta = self.peta_tombol.get(siswa_id, {})
@@ -1083,7 +1277,15 @@ class HalamanAbsensi(QWidget):
 
         for j, b in tombol_peta.items():
             b.setChecked(baru == j)
+            if baru is not None and j == baru:
+                pulsar(b, 200, 0.35)
         self.perbarui_chip(self._hitung_db())
+
+    def _sinkron_tombol(self, siswa_id):
+        status = ambil_status(self.tanggal_aktif(), siswa_id)
+        tombol_peta = self.peta_tombol.get(siswa_id, {})
+        for j, b in tombol_peta.items():
+            b.setChecked(status == j)
 
     def _hitung_status(self, rows):
         hitung = {j: 0 for j in STATUS_LIST}
@@ -1124,7 +1326,10 @@ class HalamanAbsensi(QWidget):
 
     def perbarui_chip(self, hitung):
         for jenis, chip in self.chips.items():
-            chip.setText(f"{jenis}: {hitung.get(jenis, 0)}")
+            teks = f"{jenis}: {hitung.get(jenis, 0)}"
+            if chip.text() != teks:
+                chip.setText(teks)
+                pulsar(chip, 220, 0.35)
 
     def tandai_semua_hadir(self):
         kid = self.kelas_id_aktif()
@@ -1774,6 +1979,11 @@ class HalamanRekap(QWidget):
         )
         if not path:
             return
+        pilih_csv = "csv" in terpilih.lower()
+        if pilih_csv and not path.lower().endswith(".csv"):
+            path += ".csv"
+        elif not pilih_csv and not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
 
         data = [
             [self.tabel.item(r, c).text() for c in range(4)]
@@ -1786,8 +1996,6 @@ class HalamanRekap(QWidget):
                 writer.writerow(["Tanggal", "Kelas", "Nama", "Status"])
                 writer.writerows(data)
         else:
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
             self._tulis_excel(path, data)
 
         pesan = f"Data berhasil diexport ({len(data)} baris) ke:\n{path}"
@@ -2018,12 +2226,17 @@ class HalamanKesimpulanAbsensi(QWidget):
         if self.tabel.rowCount() == 0:
             QMessageBox.information(self, "Info", "Tidak ada data untuk diexport.")
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, terpilih = QFileDialog.getSaveFileName(
             self, "Export Excel", "kesimpulan_absensi.xlsx",
             "File Excel (*.xlsx);;File CSV (*.csv)",
         )
         if not path:
             return
+        pilih_csv = "csv" in terpilih.lower()
+        if pilih_csv and not path.lower().endswith(".csv"):
+            path += ".csv"
+        elif not pilih_csv and not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
         data = [
             [self.tabel.item(r, c).text() for c in range(6)]
             for r in range(self.tabel.rowCount())
@@ -2160,6 +2373,7 @@ class HalamanNilai(QWidget):
         self.combo_jenis.currentIndexChanged.connect(lambda _: self.muat_nilai())
         self.date_tanggal.dateChanged.connect(lambda _: self.muat_nilai())
         self.peta_spin = {}
+        self.peta_nilai = {}
         tinggi_seragam(
             self.combo_kelas, self.combo_jenis,
             self.date_tanggal, btn_simpan,
@@ -2206,6 +2420,7 @@ class HalamanNilai(QWidget):
         kartu = QFrame()
         kartu.setObjectName("nilai_kartu")
         pasang_shadow(kartu, blur=24, alfa=35, offset_y=3)
+        pasang_hover_angkat(kartu)
         kolom = QVBoxLayout(kartu)
         kolom.setContentsMargins(18, 16, 18, 16)
         kolom.setSpacing(10)
@@ -2237,6 +2452,7 @@ class HalamanNilai(QWidget):
         kolom.addWidget(info)
 
         self.peta_spin = {}
+        self.peta_nilai = {}
         for data in siswa:
             baris_s = QHBoxLayout()
             baris_s.setSpacing(10)
@@ -2257,20 +2473,27 @@ class HalamanNilai(QWidget):
             spin.setFixedWidth(110)
             if data["nilai"] is not None:
                 spin.setValue(float(data["nilai"]))
+            spin._dieksekusi = False
+            spin.valueChanged.connect(
+                lambda _, s=spin: setattr(s, "_dieksekusi", True)
+            )
             self.peta_spin[data["id"]] = spin
+            self.peta_nilai[data["id"]] = data["nilai"]
             baris_s.addWidget(avatar)
             baris_s.addWidget(nama_label)
             baris_s.addStretch()
             baris_s.addWidget(spin)
             kolom.addLayout(baris_s)
 
-        self.layout_kartu.insertWidget(self.layout_kartu.count() - 1, kartu)
+        self.layout_kartu.insertWidget(self.layout_kartu.count() - 1, bungkus_masuk(kartu))
 
     def _tampil_kosong(self, teks):
         label = QLabel(teks)
         label.setObjectName("kosong")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.layout_kartu.insertWidget(0, label, 1, Qt.AlignmentFlag.AlignHCenter)
+        self.layout_kartu.insertWidget(
+            0, bungkus_masuk(label, delay=80), 1, Qt.AlignmentFlag.AlignHCenter
+        )
 
     def simpan_nilai(self):
         kid = self.kelas_id_aktif()
@@ -2281,11 +2504,19 @@ class HalamanNilai(QWidget):
         tanggal = self.date_tanggal.date().toString("yyyy-MM-dd")
         if not self.peta_spin:
             return
-        try:
-            simpan_nilai_batch(
-                (sid, jenis, tanggal, spin.value())
-                for sid, spin in self.peta_spin.items()
+        baris = []
+        for sid, spin in self.peta_spin.items():
+            sudah_ada = self.peta_nilai.get(sid) is not None
+            if not spin._dieksekusi and not sudah_ada:
+                continue
+            baris.append((sid, jenis, tanggal, spin.value()))
+        if not baris:
+            QMessageBox.information(
+                self, "Info", "Tidak ada nilai baru untuk disimpan."
             )
+            return
+        try:
+            simpan_nilai_batch(baris)
         except sqlite3.Error as e:
             QMessageBox.critical(
                 self, "Gagal",
@@ -2401,7 +2632,9 @@ class HalamanJadwal(QWidget):
             label = QLabel("Pilih kelas untuk melihat jadwal.")
             label.setObjectName("kosong")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.layout_kartu.insertWidget(0, label, 1, Qt.AlignmentFlag.AlignHCenter)
+            self.layout_kartu.insertWidget(
+                0, bungkus_masuk(label, delay=80), 1, Qt.AlignmentFlag.AlignHCenter
+            )
             return
         jadwal = ambil_jadwal(kid)
         if not jadwal:
@@ -2413,13 +2646,14 @@ class HalamanJadwal(QWidget):
             kosong_layout = QVBoxLayout(kosong)
             kosong_layout.addWidget(lab)
             kosong.setMinimumHeight(120)
-            self.layout_kartu.insertWidget(0, kosong)
+            self.layout_kartu.insertWidget(0, bungkus_masuk(kosong, delay=80))
             return
 
-        for j in jadwal:
+        for i, j in enumerate(jadwal):
             kartu = QFrame()
             kartu.setObjectName("nilai_kartu")
             pasang_shadow(kartu, blur=24, alfa=35, offset_y=3)
+            pasang_hover_angkat(kartu)
             baris = QHBoxLayout(kartu)
             baris.setContentsMargins(16, 12, 16, 12)
             baris.setSpacing(10)
@@ -2441,7 +2675,10 @@ class HalamanJadwal(QWidget):
             baris.addWidget(ket_label, 1)
             baris.addStretch()
             baris.addWidget(btn_hapus)
-            self.layout_kartu.insertWidget(self.layout_kartu.count() - 1, kartu)
+            self.layout_kartu.insertWidget(
+                self.layout_kartu.count() - 1,
+                bungkus_masuk(kartu, delay=min(i * 55, 500)),
+            )
 
     def tambah_jadwal(self):
         kid = self.kelas_id_aktif()
@@ -2706,12 +2943,17 @@ class HalamanRekapNilai(QWidget):
         if self.tabel.rowCount() == 0:
             QMessageBox.information(self, "Info", "Tidak ada data untuk diexport.")
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, terpilih = QFileDialog.getSaveFileName(
             self, "Export Excel", "rekap_nilai.xlsx",
             "File Excel (*.xlsx);;File CSV (*.csv)",
         )
         if not path:
             return
+        pilih_csv = "csv" in terpilih.lower()
+        if pilih_csv and not path.lower().endswith(".csv"):
+            path += ".csv"
+        elif not pilih_csv and not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
         data = [
             [self.tabel.item(r, c).text() for c in range(5)]
             for r in range(self.tabel.rowCount())
@@ -2723,8 +2965,6 @@ class HalamanRekapNilai(QWidget):
                 writer.writerow(header)
                 writer.writerows(data)
         else:
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
             wb = Workbook()
             ws = wb.active
             ws.title = "Rekap Nilai"
@@ -2951,19 +3191,26 @@ class JendelaUtama(QMainWindow):
         layout_utama.addWidget(self.stack, 1)
         self.setCentralWidget(wrapper)
 
-        self.terapkan_shadow_kartu()
-
         self.grup_nav.idClicked.connect(self.pindah_halaman)
         self._animasi = None
+        self._indikator_ready = False
         self.segarkan_kelas()
         self.pindah_halaman(0)
         self.showMaximized()
+        QTimer.singleShot(0, self._siap_tampil)
+
+    def _siap_tampil(self):
+        self.terapkan_shadow_kartu()
+        self._indikator_ready = True
+        idx = self.grup_nav.checkedId()
+        self._gerak_indikator(idx if idx >= 0 else 0)
 
     def terapkan_shadow_kartu(self):
+        """Pasang hover-lift pada kartu yang terlihat (aman dipanggil berulang)."""
         for w in self.findChildren(QFrame, "kartu"):
             if not w.isVisibleTo(self):
                 continue
-            pasang_shadow(w, blur=32, alfa=45, offset_y=4)
+            pasang_hover_angkat(w)
 
     def _fade_halaman(self, halaman):
         if self._animasi is not None:
@@ -3037,9 +3284,15 @@ class JendelaUtama(QMainWindow):
                 btn.setIconSize(QSize(20, 20))
             self.grup_nav.addButton(btn, idx)
             kolom.addWidget(btn)
+
+        self.indikator_nav = QFrame(self.sidebar)
+        self.indikator_nav.setObjectName("indikator_nav")
+        self.indikator_nav.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.indikator_nav.hide()
+        self.indikator_nav.lower()
         kolom.addStretch()
 
-        versi = QLabel("v2.0   •   Alfatih SmartSchool")
+        versi = QLabel("v2.1   •   Alfatih SmartSchool")
         versi.setObjectName("versi")
         versi.setAlignment(Qt.AlignmentFlag.AlignCenter)
         kolom.addWidget(versi)
@@ -3047,7 +3300,35 @@ class JendelaUtama(QMainWindow):
     def pindah_halaman(self, idx):
         stack_idx = self.NAV[idx][1]
         self.stack.setCurrentIndex(stack_idx)
+        self._gerak_indikator(idx)
         self._fade_halaman(self.stack.currentWidget())
+        self.terapkan_shadow_kartu()
+
+    def _target_indikator(self, idx):
+        tombol = self.grup_nav.button(idx)
+        if tombol is None:
+            return None
+        y = tombol.mapTo(self.sidebar, QPoint(0, 0)).y()
+        return QRect(14, y, self.sidebar.width() - 28, tombol.height())
+
+    def _gerak_indikator(self, idx, animasi=True):
+        if not self._indikator_ready:
+            self.indikator_nav.hide()
+            return
+        target = self._target_indikator(idx)
+        if target is None:
+            return
+        if not self.indikator_nav.isVisible():
+            self.indikator_nav.setGeometry(target)
+            self.indikator_nav.show()
+            return
+        anim = QPropertyAnimation(self.indikator_nav, b"geometry", self)
+        anim.setDuration(240)
+        anim.setStartValue(self.indikator_nav.geometry())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim_indic = anim
+        anim.start()
 
     def segarkan_kelas(self):
         kelas_list = ambil_daftar_kelas()
